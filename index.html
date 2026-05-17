@@ -1,0 +1,280 @@
+const { Telegraf } = require(“telegraf”);
+
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) throw new Error(“BOT_TOKEN is required”);
+
+const bot = new Telegraf(BOT_TOKEN);
+
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
+const HYPE_COOLDOWN_MS = 30_000;
+const GAME_TIMEOUT_MS  = 30_000;
+const POINTS_PER_WIN   = 10;
+
+// ─── STATE ────────────────────────────────────────────────────────────────────
+const lastHype    = new Map(); // userId -> timestamp
+const leaderboard = new Map(); // userId -> { name, points }
+const activeGame  = new Map(); // chatId -> { q, a, timer }
+
+// ─── HYPE TRIGGERS ────────────────────────────────────────────────────────────
+const HYPE_TRIGGERS = [
+{ patterns: [/\bgm\b/i, /good morning/i], responses: [
+“🌅 GM Wizards! The spell book is open — let’s conjure some gains today 🧙‍♂️✨”,
+“☀️ GM $MAGIC fam! Crystal ball says GREEN 🔮 Let’s go!”,
+“🪄 GM! Another day to cast spells on the chart. LFG 💜🚀”,
+]},
+{ patterns: [/\bgn\b/i, /good night/i], responses: [
+“🌙 GN Wizard! Dream of purple candles and $MAGIC moonshots 🔮💜”,
+“✨ GN fam! The cauldron brews while you sleep 🧪🌃”,
+“🧙‍♂️ GN! Rest well — the spell continues tomorrow 💎”,
+]},
+{ patterns: [/\blfg\b/i, /let’?s go+/i, /letsgo/i], responses: [
+“🔮 THE MAGIC IS REAL. LFG WIZARDS 🧙‍♂️🚀✨”,
+“💜 SPELLS ARE CAST. THE CHART OBEYS. LFG 🔥🪄”,
+“⚡ WIZARD WORLD NEVER SLEEPS. LFG FAM 🌕💎”,
+]},
+{ patterns: [/\bpump\b/i, /\bmoon\b/i, /\bmooning\b/i], responses: [
+“🌕 $MAGIC IS MOONBOUND! The prophecy is being fulfilled 🔮✨”,
+“📈 PUMP DETECTED — Wizards knew this was coming 🧙‍♂️💜”,
+“🪄 THE SPELL WORKED! Chart going parabolic 🚀🔥”,
+]},
+{ patterns: [/\bmagic\b/i, /$magic/i], responses: [
+“🔮 $MAGIC is the most powerful token in the realm 💜✨”,
+“🧙‍♂️ You spoke the sacred word… $MAGIC rises 📈🪄”,
+“💜 $MAGIC holders are the chosen ones. Diamond hands activate 💎”,
+]},
+{ patterns: [/\bwizard/i], responses: [
+“🧙‍♂️ WIZARDS ASSEMBLE! WizardWorld is unstoppable 💜🔮”,
+“✨ The Wizard Council grows stronger every day 🏰🪄”,
+“🔮 Wizards don’t sell. Wizards HODL and cast 💎🧙‍♂️”,
+]},
+{ patterns: [/\bwagmi\b/i], responses: [
+“🧙‍♂️ WAGMI — the ancient wizard prophecy 🔮💜”,
+“✨ WAGMI is written in the spell book. Trust the magic 🪄”,
+“💎 WAGMI Wizards. Every single one of us 🌕🔮”,
+]},
+{ patterns: [/\bngmi\b/i], responses: [
+“😤 NGMI is for muggles. Wizards always make it 🧙‍♂️💜”,
+“🔮 The crystal ball shows NO ngmi in this group 💎”,
+“🪄 Wrong spell fam. Cast WAGMI instead ✨”,
+]},
+{ patterns: [/\brugged?\b/i], responses: [
+“🛡️ Real Wizards use protection spells before entering 🔮🧙‍♂️”,
+“😤 Pain is a lesson. $MAGIC community is built different 💜”,
+“🪄 The dark arts can’t touch true believers 💎”,
+]},
+{ patterns: [/\bgreen\b/i, /\bprofit\b/i, /\bpnl\b/i], responses: [
+“💚 GREEN MAGIC! Post the PnL Wizards — we celebrate together 🔮🎉”,
+“📈 THE SPELL WORKED! Drop those gains fam 🧙‍♂️💜”,
+“💰 $MAGIC delivers. Always has, always will 🪄✨”,
+]},
+{ patterns: [/\bsolana\b/i, /\bsol\b/i], responses: [
+“⚡ Solana speed + WizardWorld magic = unstoppable combo 🔮💜”,
+“💜 SOL is the realm $MAGIC calls home. Best chain for spells 🧙‍♂️”,
+“🪄 Fastest blockchain for the fastest Wizards ✨🚀”,
+]},
+{ patterns: [/new holder/i, /new buy/i, /buying/i], responses: [
+“🧙‍♂️ ANOTHER WIZARD JOINS THE REALM! Welcome to the coven 💜✨”,
+“🔮 The prophecy grows stronger with every new holder! WAGMI 🚀”,
+“🪄 WELCOME! You’ve been chosen. $MAGIC awaits 💎🌕”,
+]},
+];
+
+// ─── TRIVIA BANK ─────────────────────────────────────────────────────────────
+const TRIVIA = [
+{ q: “What is the name of this community’s token?”, a: [“magic”, “$magic”], hint: “It’s in the group name 🔮” },
+{ q: “What blockchain does $MAGIC live on?”, a: [“solana”, “sol”], hint: “Fastest chain in crypto ⚡” },
+{ q: “What does WAGMI stand for?”, a: [“we’re all gonna make it”, “we all gonna make it”], hint: “A motto of hope and belief 🙏” },
+{ q: “What is a rug pull in crypto?”, a: [“scam”, “exit scam”, “devs run with funds”, “dev exits with money”], hint: “Something every Wizard must avoid 🚨” },
+{ q: “What does HODL mean?”, a: [“hold”, “hold on for dear life”, “holding”], hint: “A legendary crypto typo 💎” },
+{ q: “What platform is WizardWorld hosted on?”, a: [“telegram”], hint: “You’re using it right now 📱” },
+{ q: “What does LP stand for in DeFi?”, a: [“liquidity pool”, “liquidity provider”], hint: “Where trading juice lives 💧” },
+{ q: “What does NGMI stand for?”, a: [“not gonna make it”], hint: “Opposite of WAGMI 😬” },
+{ q: “What color means profit on a trading chart?”, a: [“green”], hint: “Think traffic lights 🚦” },
+{ q: “What does market cap mean?”, a: [“market capitalization”, “price times supply”, “total value”], hint: “Price x circulating supply 📐” },
+{ q: “What does degen mean in crypto slang?”, a: [“degenerate”, “risky trader”, “high risk trader”], hint: “Someone who apes into anything 🦍” },
+{ q: “What does CT stand for in crypto?”, a: [“crypto twitter”, “crypto x”], hint: “A very loud social platform 🐦” },
+{ q: “What does diamond hands mean?”, a: [“holding no matter what”, “never selling”, “strong holder”], hint: “💎 + 🙌 = ?” },
+{ q: “What platform lets you launch meme coins on Solana?”, a: [“pump.fun”, “pump fun”, “pumpfun”], hint: “Rhymes with ‘jump sun’ 🚀” },
+{ q: “What is copy trading?”, a: [“copying another wallet”, “mirroring trades”, “following a wallet”], hint: “Monkey see, monkey do 🐒” },
+{ q: “In WizardWorld lore, what do holders wield?”, a: [“magic”, “spells”], hint: “Literally the token name 🪄” },
+{ q: “What does aping in mean in crypto?”, a: [“buying without research”, “going all in”, “investing impulsively”], hint: “Bold and risky 🦍” },
+{ q: “What is a cauldron used for in wizard lore?”, a: [“brewing potions”, “making potions”, “mixing ingredients”], hint: “Think Halloween witch 🧪” },
+{ q: “What does FUD stand for?”, a: [“fear uncertainty and doubt”, “fear uncertainty doubt”], hint: “Enemies of any bull run 😨” },
+{ q: “What does ATH stand for in crypto?”, a: [“all time high”], hint: “The highest price ever reached 🏔️” },
+];
+
+// ─── COMMUNITY QUESTIONS ──────────────────────────────────────────────────────
+const COMMUNITY_QUESTIONS = [
+“🔮 *WIZARD COUNCIL SPEAKS:* What price target are you holding $MAGIC for? Drop it below 👇”,
+“🧙‍♂️ *ROLL CALL:* How long have you been a Wizard? Comment your join date 👇”,
+“💜 *MAGIC QUESTION:* What made you buy $MAGIC? Share your story 👇”,
+“🪄 *PREDICTION SPELL:* Where does $MAGIC market cap end up this month? 👇”,
+“🔮 *HOLDER CHECK:* How many $MAGIC are you holding? Drop your bag size 👇”,
+“✨ *WIZARD WISDOM:* Best crypto advice you’ve ever received? Share with the coven 👇”,
+“💎 *DIAMOND HANDS:* Would you hold through a 50% dip? Honest answers only 👇”,
+“🌕 *MOON MATH:* At what market cap do you take profit? Tell the coven 👇”,
+“🧪 *CAULDRON TALK:* What other Solana tokens are you holding alongside $MAGIC? 👇”,
+“🏰 *WIZARD WORLD LORE:* If $MAGIC had a spell, what would it do? Get creative 👇”,
+“⚡ *SOLANA CHECK:* Why did you choose Solana over other chains? 👇”,
+“🎯 *ALPHA QUESTION:* Who is the most trustworthy caller you follow? 👇”,
+];
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function randomFrom(arr) {
+return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function checkCooldown(userId) {
+const last = lastHype.get(userId) || 0;
+if (Date.now() - last < HYPE_COOLDOWN_MS) return false;
+lastHype.set(userId, Date.now());
+return true;
+}
+
+function addPoints(userId, name, pts) {
+const entry = leaderboard.get(userId) || { name, points: 0 };
+entry.name   = name;
+entry.points += pts;
+leaderboard.set(userId, entry);
+}
+
+function formatLeaderboard() {
+if (leaderboard.size === 0) {
+return “No scores yet. Cast /trivia to begin the games!”;
+}
+const sorted = […leaderboard.entries()]
+.sort((a, b) => b[1].points - a[1].points)
+.slice(0, 10);
+const medals = [“1st”, “2nd”, “3rd”];
+const lines = sorted.map(([, v], i) =>
+`${medals[i] || (i + 1) + "th"} ${v.name} - ${v.points} pts`
+);
+return (
+“WIZARD WORLD LEADERBOARD\n” +
+“========================\n” +
+lines.join(”\n”) +
+“\n\nCast /trivia to climb the ranks!”
+);
+}
+
+// ─── COMMANDS ─────────────────────────────────────────────────────────────────
+bot.command([“start”, “help”], (ctx) => {
+ctx.reply(
+“🧙‍♂️ WIZARD WORLD BOT AWAKENS 🔮\n\n” +
+“I keep the WizardWorld $MAGIC community LIT!\n\n” +
+“SPELL BOOK (Commands):\n” +
+“🪄 /trivia - Test your Wizard knowledge\n” +
+“🏆 /leaderboard - Top Wizards by points\n” +
+“🔮 /hype - Summon a hype spell\n” +
+“💬 /question - Drop a community question\n\n” +
+“I also respond to chat automatically!\n” +
+“Try saying: GM, LFG, pump, magic, wizard, WAGMI”
+);
+});
+
+bot.command(“hype”, (ctx) => {
+const drops = [
+“🔮 WIZARDWORLD $MAGIC IS THE MOST POWERFUL TOKEN IN THE REALM 💜🧙‍♂️✨”,
+“🪄 THE SPELL HAS BEEN CAST. $MAGIC ONLY GOES UP FROM HERE 📈🌕”,
+“💜 DIAMOND HANDS. ANCIENT SPELLS. WIZARD WORLD WINS. ALWAYS 💎🔮”,
+“🧙‍♂️ THE PROPHECY IS CLEAR — $MAGIC HOLDERS ARE THE CHOSEN ONES 🌕✨”,
+“⚡ SOLANA SPEED + WIZARD MAGIC = NOTHING CAN STOP US 🔥💜🚀”,
+“🔮 EVERY WIZARD IN THIS REALM IS GOING TO MAKE IT. WAGMI 🧙‍♂️💎”,
+];
+ctx.reply(randomFrom(drops));
+});
+
+bot.command(“trivia”, async (ctx) => {
+const chatId = ctx.chat.id;
+if (activeGame.has(chatId)) {
+return ctx.reply(“⏳ A spell is already active! Answer it before casting another 🧙‍♂️”);
+}
+const q = randomFrom(TRIVIA);
+await ctx.reply(
+“🧠 WIZARD TRIVIA TIME! ✨\n\n” +
+“❓ “ + q.q + “\n\n” +
+“🪄 Hint: “ + q.hint + “\n\n” +
+“💰 First correct answer wins “ + POINTS_PER_WIN + “ points!”
+);
+const timer = setTimeout(async () => {
+if (activeGame.has(chatId)) {
+activeGame.delete(chatId);
+try {
+await ctx.reply(
+“⏰ Time’s up! The answer was: “ + q.a[0].toUpperCase() +
+“\n\nNo points awarded 😤 Try /trivia again!”
+);
+} catch (_) {}
+}
+}, GAME_TIMEOUT_MS);
+activeGame.set(chatId, { …q, timer });
+});
+
+bot.command(“leaderboard”, (ctx) => {
+ctx.reply(formatLeaderboard());
+});
+
+bot.command(“question”, (ctx) => {
+ctx.reply(randomFrom(COMMUNITY_QUESTIONS));
+});
+
+// ─── MESSAGE HANDLER ─────────────────────────────────────────────────────────
+bot.on(“text”, async (ctx) => {
+const text     = ctx.message.text;
+const userId   = ctx.from.id;
+const chatId   = ctx.chat.id;
+const userName = ctx.from.first_name || ctx.from.username || “Wizard”;
+
+// ── Trivia answer check ──────────────────────────────────────────────────
+if (activeGame.has(chatId)) {
+const game  = activeGame.get(chatId);
+const guess = text.trim().toLowerCase();
+const correct = game.a.some(ans => guess.includes(ans));
+if (correct) {
+clearTimeout(game.timer);
+activeGame.delete(chatId);
+addPoints(userId, userName, POINTS_PER_WIN);
+const total = leaderboard.get(userId)?.points || POINTS_PER_WIN;
+await ctx.reply(
+“🎉 “ + userName + “ ANSWERED THE SPELL! 🧙‍♂️\n\n” +
+“✅ Answer: “ + game.a[0].toUpperCase() + “\n” +
+“💰 +” + POINTS_PER_WIN + “ points! Total: “ + total + “ pts ✨\n\n” +
+“🏆 Type /leaderboard to see your rank”
+);
+return;
+}
+}
+
+// ── Hype trigger check ───────────────────────────────────────────────────
+for (const { patterns, responses } of HYPE_TRIGGERS) {
+if (patterns.some(p => p.test(text))) {
+if (!checkCooldown(userId)) return;
+await ctx.reply(randomFrom(responses));
+return;
+}
+}
+
+// ── Random engagement nudge (5% chance) ─────────────────────────────────
+if (Math.random() < 0.05) {
+const nudges = [
+“👀 Wizards lurking… drop a 🔮 if you’re watching the chart!”,
+“🧙‍♂️ It’s quiet in the realm… cast /trivia to earn points!”,
+“💜 Real Wizards tap /hype when the energy needs a boost 🔮”,
+“✨ The crystal ball demands more activity! Drop a GM Wizards 🧙‍♂️”,
+];
+await ctx.reply(randomFrom(nudges));
+}
+});
+
+// ─── ERROR HANDLER ────────────────────────────────────────────────────────────
+bot.catch((err, ctx) => {
+console.error(“WizardWorld Bot Error [” + (ctx && ctx.updateType) + “]:”, err.message);
+});
+
+// ─── LAUNCH ───────────────────────────────────────────────────────────────────
+bot.launch().then(() => {
+console.log(“🔮 WizardWorld $MAGIC Bot is LIVE ✨”);
+});
+
+process.once(“SIGINT”,  () => bot.stop(“SIGINT”));
+process.once(“SIGTERM”, () => bot.stop(“SIGTERM”));
